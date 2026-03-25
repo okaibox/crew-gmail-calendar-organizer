@@ -299,6 +299,54 @@ for mem in data.get('memory_updates', []):
             with open(rf, 'w') as f:
                 json.dump(rules_data, f, ensure_ascii=False, indent=2)
 
-print(f'SUMMARY: auto={auto_count} queued={queue_count} schedules={schedule_count}')
+# --- fast_patterns 학습 (Phase 2 → Phase 1 fast로 승격) ---
+fast_learned = 0
+for pat in data.get('fast_patterns', []):
+    pat_type = pat.get('type', '')
+    match_key = pat.get('match', '')
+    label = pat.get('label', '')
+    reason = pat.get('reason', '')
+    if not match_key or not label:
+        continue
+
+    if pat_type == 'sender':
+        pf = os.path.join(memory_dir, 'sender-patterns.json')
+        try:
+            with open(pf) as f: sp = json.load(f)
+        except: sp = {'version':1,'last_updated':None,'patterns':{}}
+        if match_key not in sp['patterns']:
+            sp['patterns'][match_key] = {
+                'label': label, 'archive': True,
+                'count': 1, 'last_seen': now_kst[:10],
+                'note': f'AI fast: {reason}'
+            }
+            sp['last_updated'] = now_kst
+            with open(pf, 'w') as f:
+                json.dump(sp, f, ensure_ascii=False, indent=2)
+            fast_learned += 1
+            print(f'FAST_LEARN: {match_key} -> {label}')
+
+    elif pat_type == 'keyword':
+        rf = os.path.join(memory_dir, 'classification-rules.json')
+        try:
+            with open(rf) as f: rd = json.load(f)
+        except: rd = {'version':1,'last_updated':None,'rules':[],'label_descriptions':{}}
+        exists = any(r.get('pattern',{}).get('subject_contains') == match_key for r in rd['rules'])
+        if not exists:
+            rd['rules'].append({
+                'id': f'rule-fast-{len(rd[\"rules\"])+1:03d}',
+                'pattern': {'from_contains': None, 'subject_contains': match_key},
+                'action': {'label': label, 'archive': True},
+                'confidence': 0.9, 'source': 'ai_fast_pattern',
+                'created': now_kst[:10], 'applied_count': 0,
+                'note': f'AI fast: {reason}'
+            })
+            rd['last_updated'] = now_kst
+            with open(rf, 'w') as f:
+                json.dump(rd, f, ensure_ascii=False, indent=2)
+            fast_learned += 1
+            print(f'FAST_LEARN: keyword \"{match_key}\" -> {label}')
+
+print(f'SUMMARY: auto={auto_count} queued={queue_count} schedules={schedule_count} fast_learned={fast_learned}')
 " 2>/dev/null
 }
