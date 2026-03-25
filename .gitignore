@@ -1,4 +1,18 @@
+# 환경 변수
 .env
+
+# 인증 정보
+.credentials/*
+!.credentials/README.md
+!.credentials/.gitkeep
+
+# 런타임 데이터
+data/
 logs/
+
+# 기존 호환
 *.log
 email-watcher-state.json
+
+# OS
+.DS_Store

@@ -1,14 +1,15 @@
-PATH=/opt/homebrew/bin:/Users/YOUR_USER/.local/bin:/Users/YOUR_USER/.bun/bin:/usr/bin:/bin:/usr/local/bin
-HOME=/Users/YOUR_USER
+# Gmail + Calendar 자동화
+# 경로를 실제 설치 경로로 변경하세요
 
-# 새 메일 감지 + Claude 분류 + 로그 저장 (5분마다)
-*/5 * * * * bash /path/to/email-watcher.sh >> /path/to/logs/cron.log 2>&1
+PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+HOME=/Users/kevinpark
+PROJECT=/Users/kevinpark/Documents/projects/OKAI/gmail-calendar-organizer
 
-# 로그 요약 → 텔레그램 (3시간마다)
-0 */3 * * * bash /path/to/email-log-summary.sh >> /path/to/logs/cron.log 2>&1
+# 받은편지함 정리 - 규칙+AI 분류 (5분마다, 빌때까지)
+*/5 * * * * bash $PROJECT/bin/email-watcher.sh >> $PROJECT/logs/cron.log 2>&1
 
-# 이메일 전체 정리 (6시간마다)
-0 */6 * * * bash /path/to/email-organizer.sh >> /path/to/logs/cron.log 2>&1
+# 피드백 큐 처리 (30분마다)
+*/30 * * * * bash $PROJECT/bin/feedback-processor.sh >> $PROJECT/logs/cron.log 2>&1
 
-# 오전 브리핑 (매일 08:00)
-0 8 * * * bash /path/to/run-briefing.sh >> /path/to/logs/cron.log 2>&1
+# 로그 요약 (매일 09:00, 18:00)
+0 9,18 * * * bash $PROJECT/bin/log-summary.sh >> $PROJECT/logs/cron.log 2>&1

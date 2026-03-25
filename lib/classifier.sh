@@ -1,0 +1,320 @@
+#!/bin/bash
+# Claude 분류 시스템
+# Phase 1: 사전 분류 — 메일 목록(제목+발신자)을 일괄 판단 → fast/need_body 분류
+# Phase 2: 상세 분류 — need_body 메일만 본문 포함하여 개별 AI 분류
+
+# === Phase 1: 사전 분류 (제목+발신자만, 일괄) ===
+pre_classify() {
+  local mail_list_json="$1"
+  local acct="$2"
+
+  local template
+  template=$(cat "$PROMPTS_DIR/pre-classify.txt")
+  template="${template//\{TODAY\}/$(date +%Y-%m-%d)}"
+
+  local memory_ctx
+  memory_ctx=$(load_memory_context)
+
+  # 메일 목록에서 id/subject/from만 추출하여 경량 데이터 생성
+  local light_list
+  light_list=$(echo "$mail_list_json" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+mails = []
+for msg in data.get('messages', []):
+    mails.append({
+        'id': msg['id'],
+        'subject': msg.get('subject', ''),
+        'from': msg.get('from', ''),
+        'date': msg.get('date', '')
+    })
+print(json.dumps(mails, ensure_ascii=False, indent=2))
+" 2>/dev/null)
+
+  local prompt="${template}
+
+${memory_ctx}
+
+계정: $acct
+=== 메일 목록 (${light_list} 건) ===
+$light_list"
+
+  claude --print --model sonnet --allowed-tools "" -- "$prompt" 2>/dev/null || echo '{"fast":[],"need_body":[]}'
+}
+
+# === Phase 1 결과 처리: fast 항목 라벨 적용 (직접 API, subprocess 없음) ===
+process_pre_classify_result() {
+  local result_json="$1"
+  local acct="$2"
+
+  echo "$result_json" | python3 -c "
+import json, sys, os
+sys.path.insert(0, '$LIB_DIR')
+from google_api import get_auth, GmailClient
+
+raw = sys.stdin.read()
+start = raw.find('{'); end = raw.rfind('}') + 1
+if start == -1:
+    print('FAST_DONE:0')
+    sys.exit(0)
+data = json.loads(raw[start:end])
+
+log_file = '$EMAIL_LOG'
+now_kst = '$NOW_KST'
+acct = '$acct'
+
+# API 클라이언트 1회 초기화
+auth = get_auth(acct, '$PROJECT_ROOT')
+client = GmailClient(auth)
+
+count = 0
+for item in data.get('fast', []):
+    tid = item.get('id', '')
+    label = item.get('label', '')
+    conf = item.get('confidence', 0.9)
+    reason = item.get('reason', '')
+
+    if not tid or not label:
+        continue
+
+    # 라벨 적용 + 보관 (한 번의 API 호출)
+    try:
+        if label.lower() == 'null' or label == '분류안함':
+            status = 'skip'
+        else:
+            client.modify_labels([tid], add_labels=[label], remove_labels=['INBOX'])
+            status = 'success'
+    except Exception as e:
+        status = 'failed'
+
+    # 로그
+    with open(log_file, 'a') as f:
+        f.write(json.dumps({
+            'time': now_kst, 'account': acct, 'email_id': tid,
+            'label': label, 'confidence': conf, 'method': 'fast',
+            'reason': reason
+        }, ensure_ascii=False) + '\n')
+
+    count += 1
+    print(f'FAST: {label} | {reason} [{status}]')
+
+# need_body ID 목록 출력
+need_ids = [item.get('id','') for item in data.get('need_body', []) if item.get('id')]
+for nid in need_ids:
+    print(f'NEED_BODY:{nid}')
+
+print(f'FAST_DONE:{count}')
+" 2>/dev/null
+}
+
+# === Phase 2: 상세 분류 프롬프트 빌드 ===
+build_classify_prompt() {
+  local emails="$1"
+  local acct="$2"
+
+  local template
+  template=$(cat "$PROMPTS_DIR/classify-email.txt")
+  template="${template//\{TODAY\}/$(date +%Y-%m-%d)}"
+
+  local memory_ctx
+  memory_ctx=$(load_memory_context)
+
+  local label_desc
+  label_desc=$(load_label_descriptions)
+
+  echo "${template}
+
+${memory_ctx}
+=== 현재 라벨 목록 ===
+${label_desc}
+
+계정: $acct
+=== 메일 데이터 ===
+$emails"
+}
+
+# === Phase 2: Claude CLI 호출 ===
+classify_emails() {
+  local emails="$1"
+  local acct="$2"
+
+  local prompt
+  prompt=$(build_classify_prompt "$emails" "$acct")
+
+  claude --print --model sonnet --allowed-tools "" -- "$prompt" 2>/dev/null || echo '{"results":[],"new_label_suggestions":[],"memory_updates":[]}'
+}
+
+# === Phase 2: 분류 결과 처리 ===
+process_classification_result() {
+  local result_json="$1"
+  local acct="$2"
+  local threshold="${CONFIDENCE_THRESHOLD:-0.6}"
+
+  echo "$result_json" | python3 -c "
+import json, sys, os
+sys.path.insert(0, '$LIB_DIR')
+from google_api import get_auth, GmailClient
+
+raw = sys.stdin.read()
+start = raw.find('{'); end = raw.rfind('}') + 1
+if start == -1: sys.exit(0)
+data = json.loads(raw[start:end])
+
+threshold = float('$threshold')
+queue_dir = '$QUEUE_DIR'
+log_file = '$EMAIL_LOG'
+now_kst = '$NOW_KST'
+acct = '$acct'
+memory_dir = '$MEMORY_DIR'
+
+# API 클라이언트 1회 초기화
+auth = get_auth(acct, '$PROJECT_ROOT')
+client = GmailClient(auth)
+
+auto_count = 0
+queue_count = 0
+schedule_count = 0
+
+for item in data.get('results', []):
+    mid = item.get('id', '')
+    cls = item.get('classification', {})
+    schedule = item.get('schedule')
+    log_entry = item.get('log', {})
+    needs_review = item.get('needs_user_review', False)
+    review_reason = item.get('review_reason', '')
+
+    label = cls.get('label', '') or ''
+    conf = cls.get('confidence', 0.8)
+    cls_reason = cls.get('reason', '')
+
+    title = log_entry.get('title', '')
+    sender = log_entry.get('from', '')
+    urgency = log_entry.get('urgency', 'none')
+    summary = log_entry.get('summary', '')
+
+    # --- 로그 기록 (모든 메일) ---
+    with open(log_file, 'a') as f:
+        f.write(json.dumps({
+            'time': now_kst, 'account': acct, 'email_id': mid,
+            'title': title, 'from': sender, 'label': label,
+            'confidence': conf, 'urgency': urgency, 'summary': summary,
+            'has_schedule': schedule is not None, 'needs_review': needs_review,
+            'method': 'ai'
+        }, ensure_ascii=False) + '\n')
+
+    # --- 사용자 확인 필요 → INBOX 유지 + 분류 큐 ---
+    if needs_review or conf < threshold:
+        queue_file = os.path.join(queue_dir, 'pending-classifications.json')
+        try:
+            with open(queue_file) as f:
+                q = json.load(f)
+        except:
+            q = {'pending': []}
+        q['pending'].append({
+            'id': f'pending-{mid[:12]}',
+            'created': now_kst,
+            'email_id': mid, 'account': acct,
+            'subject': title, 'from': sender, 'summary': summary,
+            'ai_suggestion': {'label': label, 'confidence': conf, 'reason': review_reason or cls_reason},
+            'decision': None, 'user_label': None, 'user_note': None
+        })
+        with open(queue_file, 'w') as f:
+            json.dump(q, f, ensure_ascii=False, indent=2)
+        queue_count += 1
+        print(f'QUEUE: {title[:50]} (conf:{conf:.1f}) {review_reason}')
+        continue
+
+    # --- 자동 분류 실행 (라벨 + 보관) ---
+    if mid and label and label not in ('분류안함', 'null', ''):
+        try:
+            client.modify_labels([mid], add_labels=[label], remove_labels=['INBOX'])
+            status = 'success'
+        except:
+            status = 'failed'
+        auto_count += 1
+        print(f'AI: {label} | {title[:50]} | {sender[:30]} [{status}]')
+
+    # --- 일정 감지 → 캘린더 큐 ---
+    if schedule:
+        cal_queue_file = os.path.join(queue_dir, 'pending-calendars.json')
+        try:
+            with open(cal_queue_file) as f:
+                cq = json.load(f)
+        except:
+            cq = {'pending': []}
+        cq['pending'].append({
+            'id': f'cal-{mid[:12]}', 'created': now_kst,
+            'source_email': title, 'account': acct,
+            'proposal': {
+                'type': schedule.get('type', 'event'),
+                'summary': schedule.get('summary', title),
+                'start': schedule.get('start', ''),
+                'end': schedule.get('end', ''),
+                'location': schedule.get('location'),
+            },
+            'confidence': schedule.get('confidence', 0.5),
+            'needs_confirm': schedule.get('needs_confirm', True),
+            'decision': None
+        })
+        with open(cal_queue_file, 'w') as f:
+            json.dump(cq, f, ensure_ascii=False, indent=2)
+        schedule_count += 1
+        print(f'SCHEDULE: {schedule.get(\"summary\",\"\")} ({schedule.get(\"start\",\"\")[:16]})')
+
+# --- 새 라벨 제안 → 큐 ---
+for suggestion in data.get('new_label_suggestions', []):
+    label_queue = os.path.join(queue_dir, 'pending-labels.json')
+    try:
+        with open(label_queue) as f:
+            lq = json.load(f)
+    except:
+        lq = {'pending': []}
+    lq['pending'].append({
+        'id': f'label-{suggestion.get(\"name\",\"\")}', 'created': now_kst,
+        'suggested_name': suggestion.get('name', ''),
+        'reason': suggestion.get('reason', ''),
+        'sample_subjects': suggestion.get('sample_subjects', []),
+        'accounts': [acct], 'decision': None
+    })
+    with open(label_queue, 'w') as f:
+        json.dump(lq, f, ensure_ascii=False, indent=2)
+    print(f'NEW_LABEL: {suggestion.get(\"name\",\"\")}')
+
+# --- 메모리 학습 ---
+for mem in data.get('memory_updates', []):
+    mem_type = mem.get('type', '')
+    if mem_type == 'sender_pattern':
+        pf = os.path.join(memory_dir, 'sender-patterns.json')
+        try:
+            with open(pf) as f: patterns = json.load(f)
+        except: patterns = {'version':1,'last_updated':None,'patterns':{}}
+        sender_key = mem.get('from', '')
+        if sender_key and sender_key not in patterns['patterns']:
+            patterns['patterns'][sender_key] = {
+                'label': mem.get('label',''), 'archive': True,
+                'count': 1, 'last_seen': now_kst[:10], 'note': mem.get('note','')
+            }
+            patterns['last_updated'] = now_kst
+            with open(pf, 'w') as f:
+                json.dump(patterns, f, ensure_ascii=False, indent=2)
+    elif mem_type == 'keyword_pattern':
+        rf = os.path.join(memory_dir, 'classification-rules.json')
+        try:
+            with open(rf) as f: rules_data = json.load(f)
+        except: rules_data = {'version':1,'last_updated':None,'rules':[],'label_descriptions':{}}
+        kw = mem.get('keyword', '')
+        if kw:
+            rules_data['rules'].append({
+                'id': f'rule-auto-{len(rules_data[\"rules\"])+1:03d}',
+                'pattern': {'from_contains': None, 'subject_contains': kw},
+                'action': {'label': mem.get('label',''), 'archive': True},
+                'confidence': 0.7, 'source': 'ai_learned',
+                'created': now_kst[:10], 'applied_count': 0, 'note': mem.get('note','')
+            })
+            rules_data['last_updated'] = now_kst
+            with open(rf, 'w') as f:
+                json.dump(rules_data, f, ensure_ascii=False, indent=2)
+
+print(f'SUMMARY: auto={auto_count} queued={queue_count} schedules={schedule_count}')
+" 2>/dev/null
+}
