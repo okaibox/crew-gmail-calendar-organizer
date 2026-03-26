@@ -121,7 +121,7 @@ print(json.dumps({'messages': messages}, ensure_ascii=False))
   # ============================================
   T1=$(date +%s)
   echo "  Phase 1: 사전 분류 (제목+발신자만)..."
-  PRE_RESULT=$(pre_classify "$MAIL_LIST" "$acct")
+  PRE_RESULT=$(pre_classify "$MAIL_LIST" "$acct") || true
   echo "  Phase 1 Claude: $(elapsed $T1)"
 
   NEED_BODY_IDS=""
@@ -170,8 +170,8 @@ for m in json.load(sys.stdin).get('messages',[]):
       THREAD_DETAIL=$(fetch_thread_detail "$tid" "$acct")
       [ -z "$THREAD_DETAIL" ] && { mark_processed "$tid" "$acct"; continue; }
 
-      RESULT=$(classify_emails "$THREAD_DETAIL" "$acct")
-      process_classification_result "$RESULT" "$acct"
+      RESULT=$(classify_emails "$THREAD_DETAIL" "$acct") || true
+      process_classification_result "$RESULT" "$acct" || true
 
       mark_processed "$tid" "$acct"
       TOTAL_AI=$((TOTAL_AI + 1))
