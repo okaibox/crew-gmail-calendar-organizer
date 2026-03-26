@@ -1,7 +1,14 @@
 # Gmail + Calendar 자동화 시스템
 
-Mac Mini에서 crontab으로 구동하는 이메일 자동 분류 + 캘린더 일정 등록 시스템.
-Google API 직접 호출 + Claude Code CLI 기반.
+**Claude Code CLI 기반 AI 이메일 자동 분류 솔루션.**
+
+Mac Mini 같은 미니 PC에서 crontab으로 구동. Google API 직접 호출 + Claude Code CLI(`claude --print`)로 AI 판단. 별도 API 키 불필요 — Claude 구독만으로 동작.
+
+## 요구사항
+
+- **Claude Pro 또는 Max 구독** (Claude Code CLI 사용)
+- **Max 추천** — 5분마다 cron 실행으로 호출 빈도가 높아 Pro는 rate limit에 걸릴 수 있음
+- Python 3.10+, Google Cloud OAuth 인증
 
 ## 아키텍처
 

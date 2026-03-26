@@ -2,7 +2,6 @@
 # Claude 분류 시스템
 # Phase 1: 사전 분류 — 메일 목록(제목+발신자)을 일괄 판단 → fast/need_body 분류
 # Phase 2: 상세 분류 — need_body 메일만 본문 포함하여 개별 AI 분류
-
 # === Phase 1: 사전 분류 (제목+발신자만, 일괄) ===
 pre_classify() {
   local mail_list_json="$1"
@@ -36,7 +35,7 @@ print(json.dumps(mails, ensure_ascii=False, indent=2))
 ${memory_ctx}
 
 계정: $acct
-=== 메일 목록 (${light_list} 건) ===
+=== 메일 목록 ===
 $light_list"
 
   claude --print --model sonnet --allowed-tools "" -- "$prompt" 2>/dev/null || echo '{"fast":[],"need_body":[]}'
@@ -141,7 +140,7 @@ classify_emails() {
   local prompt
   prompt=$(build_classify_prompt "$emails" "$acct")
 
-  claude --print --model sonnet --allowed-tools "" -- "$prompt" 2>/dev/null || echo '{"results":[],"new_label_suggestions":[],"memory_updates":[]}'
+  claude --print --model sonnet --allowed-tools "" -- "$prompt" 2>/dev/null || echo '{"results":[],"new_label_suggestions":[],"fast_patterns":[]}'
 }
 
 # === Phase 2: 분류 결과 처리 ===
@@ -260,7 +259,9 @@ for suggestion in data.get('new_label_suggestions', []):
             'suggested_name': suggestion.get('name', ''),
             'reason': suggestion.get('reason', ''),
             'sample_subjects': suggestion.get('sample_subjects', []),
-            'accounts': [acct], 'action': None, 'action_arg': None
+            'email_ids': suggestion.get('email_ids', [mid] if mid else []),
+            'account': acct,
+            'action': None, 'action_arg': None
         }, f, ensure_ascii=False, indent=2)
     print(f'NEW_LABEL: {suggestion.get(\"name\",\"\")}')
 

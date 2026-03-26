@@ -273,12 +273,28 @@ for fpath in sorted(glob.glob(os.path.join(queue_dir, 'labels', '*.json'))):
 
     if action == 'label':
         label_name = item.get('action_arg') or item.get('suggested_name', '')
-        for acct in item.get('accounts', []):
+        acct = item.get('account', '')
+
+        # 1. Gmail 라벨 생성
+        if acct:
             try:
-                get_client(acct).create_label(label_name)
+                client = get_client(acct)
+                client.create_label(label_name)
             except: pass
 
-        # data/labels.json 업데이트
+        # 2. 해당 메일에 라벨 적용 + 보관
+        email_ids = item.get('email_ids', [])
+        if email_ids and acct:
+            try:
+                client = get_client(acct)
+                client.modify_labels(email_ids, add_labels=[label_name, '_processed'], remove_labels=['INBOX'])
+                print(f'  새 라벨: {label_name} ({len(email_ids)}건 적용)')
+            except Exception as e:
+                print(f'  라벨 적용 실패: {e}')
+        else:
+            print(f'  새 라벨: {label_name} (적용 대상 없음)')
+
+        # 3. data/labels.json 업데이트
         labels_file = os.path.join(data_dir, 'labels.json')
         try:
             with open(labels_file) as f:
@@ -292,7 +308,6 @@ for fpath in sorted(glob.glob(os.path.join(queue_dir, 'labels', '*.json'))):
                 'default_archive': True
             })
             save_json(labels_file, cfg)
-        print(f'  새 라벨: {label_name}')
 
     elif action == 'skip':
         print(f'  라벨 스킵: {item.get(\"suggested_name\",\"\")}')

@@ -17,5 +17,6 @@ logs/
 *.log
 email-watcher-state.json
 
+
 # OS
 .DS_Store
