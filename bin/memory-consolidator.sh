@@ -1,6 +1,6 @@
 #!/bin/bash
 # 메모리 통합 - 주 1회 cron 실행
-# Ollama (gpt-oss:20b)으로 메모리 분석 + 최적화
+# Ollama 로컬 LLM으로 메모리 분석 + 최적화
 #
 # 1. 현재 메모리 + 수정 이력 → LLM이 분석
 # 2. 패턴 병합/정리/충돌 감지
@@ -70,8 +70,8 @@ ${CORRECTIONS}
 === 최근 7일 분류 통계 ===
 ${LOG_STATS}"
 
-# Ollama (gpt-oss:20b)으로 분석
-echo "  LLM 분석 중 (gpt-oss:20b)..."
+# Ollama LLM으로 분석
+echo "  LLM 분석 중 (${LLM_MODEL:-qwen3:14b})..."
 T0=$(date +%s)
 
 RESULT=$(llm_call "$PROMPT" 2>/dev/null || echo "")
