@@ -20,7 +20,46 @@ QUEUE_DIR="$DATA_DIR/queue"
 STATE_FILE="$DATA_DIR/state.json"
 
 # === 디렉토리 보장 ===
-mkdir -p "$LOG_DIR" "$MEMORY_DIR" "$QUEUE_DIR"
+mkdir -p "$LOG_DIR" "$MEMORY_DIR" "$QUEUE_DIR/classifications" "$QUEUE_DIR/calendars" "$QUEUE_DIR/labels"
+
+# === 메모리 초기화 (최초 실행 시 커뮤니티 패턴 자동 병합) ===
+_init_memory_from_community() {
+  local community_dir="$CONFIG_DIR/community"
+
+  # sender-patterns.json 없으면 커뮤니티에서 초기화
+  if [[ ! -f "$MEMORY_DIR/sender-patterns.json" ]]; then
+    python3 -c "
+import json, datetime
+with open('$community_dir/sender-patterns.json') as f:
+    src = json.load(f)
+patterns = {k: v for k, v in src.get('patterns', {}).items() if not k.startswith('_section')}
+data = {'version': 1, 'last_updated': '$(date +%Y-%m-%d)', 'patterns': patterns}
+with open('$MEMORY_DIR/sender-patterns.json', 'w') as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+" 2>/dev/null
+    echo "[init] sender-patterns.json 초기화 완료 (커뮤니티 패턴 적용)"
+  fi
+
+  # classification-rules.json 없으면 커뮤니티에서 초기화
+  if [[ ! -f "$MEMORY_DIR/classification-rules.json" ]]; then
+    python3 -c "
+import json
+with open('$community_dir/classification-rules.json') as f:
+    src = json.load(f)
+rules = src.get('rules', [])
+data = {'version': 1, 'last_updated': '$(date +%Y-%m-%d)', 'rules': rules, 'label_descriptions': {}}
+with open('$MEMORY_DIR/classification-rules.json', 'w') as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+" 2>/dev/null
+    echo "[init] classification-rules.json 초기화 완료 (커뮤니티 패턴 적용)"
+  fi
+
+  # user-corrections.jsonl 없으면 빈 파일 생성
+  if [[ ! -f "$MEMORY_DIR/user-corrections.jsonl" ]]; then
+    touch "$MEMORY_DIR/user-corrections.jsonl"
+  fi
+}
+_init_memory_from_community
 
 # === 계정 로드 ===
 load_accounts() {
