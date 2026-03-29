@@ -17,16 +17,18 @@ source "$SCRIPTS/lib/common.sh"
 source "$SCRIPTS/lib/classifier.sh"
 source "$SCRIPTS/lib/gmail-actions.sh"
 
-BATCH_SIZE=20
+BATCH_SIZE=10
 MAX_ROUNDS=1
 DATE_FILTER="newer_than:30d"
+ACCOUNT_FILTER=""
 
 # 옵션 파싱
 for arg in "$@"; do
   case "$arg" in
-    --all)     DATE_FILTER="" ;;
-    --repeat)  MAX_ROUNDS=999 ;;  # 빌 때까지 반복
-    --rounds=*) MAX_ROUNDS="${arg#--rounds=}" ;;
+    --all)        DATE_FILTER="" ;;
+    --repeat)     MAX_ROUNDS=999 ;;
+    --rounds=*)   MAX_ROUNDS="${arg#--rounds=}" ;;
+    --account=*)  ACCOUNT_FILTER="${arg#--account=}" ;;
   esac
 done
 
@@ -89,6 +91,8 @@ while [ "$ROUND" -le "$MAX_ROUNDS" ]; do
 ROUND_EMPTY=true
 
 for acct in "${ACCOUNTS[@]}"; do
+  # --account 필터
+  if [ -n "$ACCOUNT_FILTER" ] && [ "$acct" != "$ACCOUNT_FILTER" ]; then continue; fi
   ensure_processed_label "$acct"
 
   # 스레드 20개 가져오기
@@ -125,6 +129,7 @@ print(json.dumps({'messages': messages}, ensure_ascii=False))
   echo "  Phase 1 LLM: $(elapsed $T1)"
 
   NEED_BODY_IDS=""
+  FAST_IDS=""
   TOTAL_FAST=0
 
   T1_APPLY=$(date +%s)
@@ -139,7 +144,17 @@ print(json.dumps({'messages': messages}, ensure_ascii=False))
     fi
   done < <(process_pre_classify_result "$PRE_RESULT" "$acct")
 
-  # fast 처리된 스레드 _processed 표시
+  # Phase 1이 빈 결과 반환 시 (LLM 실패 등) → 전체를 Phase 2로 강제 투입
+  if [ "$TOTAL_FAST" -eq 0 ] && [ -z "$(echo "$NEED_BODY_IDS" | tr -d ' ')" ]; then
+    echo "  ⚠ Phase 1 빈 결과 → 전체 ${THREAD_COUNT}건 Phase 2로 처리"
+    NEED_BODY_IDS=$(echo "$MAIL_LIST" | python3 -c "
+import json, sys
+for m in json.load(sys.stdin).get('messages', []):
+    print(m['id'])
+" 2>/dev/null | tr '\n' ' ')
+  fi
+
+  # fast 처리된 스레드 _processed 표시 (need_body에 없는 것 = fast로 처리된 것)
   echo "$MAIL_LIST" | python3 -c "
 import json, sys
 need = set('$NEED_BODY_IDS'.split())

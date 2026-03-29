@@ -16,7 +16,7 @@ def main():
         print("사용법: llm_call.py <prompt_file>", file=sys.stderr)
         sys.exit(1)
 
-    model = os.environ.get("LLM_MODEL", "qwen3:14b")
+    model = os.environ.get("LLM_MODEL", "gpt-oss:20b")
     base_url = os.environ.get("LLM_BASE_URL", "http://localhost:11434")
 
     prompt_file = sys.argv[1]
@@ -41,7 +41,7 @@ def main():
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
+        with urllib.request.urlopen(req, timeout=600) as resp:
             result = json.load(resp)
             print(result["response"], end="")
     except urllib.error.URLError as e:

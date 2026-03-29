@@ -273,7 +273,7 @@ print(raw[start:end])
 llm_call() {
   local prompt="$1"
   local tmpfile
-  tmpfile=$(mktemp /tmp/llm_XXXXXX.txt)
+  tmpfile=$(mktemp /tmp/llm_XXXXXX)
   printf '%s' "$prompt" > "$tmpfile"
   python3 "$LIB_DIR/llm_call.py" "$tmpfile"
   local status=$?
