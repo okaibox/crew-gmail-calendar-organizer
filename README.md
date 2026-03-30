@@ -103,11 +103,15 @@ bash bin/memory-consolidator.sh
 ```text
 미처리 스레드 조회 (Gmail API batch)
     ↓
-Phase 1: 메모리 패턴 매칭 (LLM 미사용, 즉시 처리)
+Phase 1: 메모리 패턴 매칭 (즉시 처리, LLM 미사용)
   ├─ fast → 라벨 + 보관
-  └─ need_body → Phase 2로
+  └─ need_body → Phase 1 AI로
     ↓
-Phase 2: 본문 포함 LLM 분류 (Ollama)
+Phase 1 AI: 메타데이터 AI 분류 (제목+발신자+snippet, 본문 미조회)
+  ├─ 확신 있음 → 라벨 + 보관
+  └─ needs_body → Phase 2로
+    ↓
+Phase 2: 본문 포함 상세 분류 (스레드 전체 대화)
   ├─ 자동 분류 → 라벨 + 보관
   ├─ 미결정 → 큐 파일 생성 (사용자 확인)
   └─ 일정 감지 → 캘린더 큐 생성
@@ -119,18 +123,33 @@ Phase 2: 본문 포함 LLM 분류 (Ollama)
 
 ## 설정
 
-### LLM 모델
+### LLM 설정
 
-환경변수로 Ollama 모델을 변경할 수 있습니다.
+`LLM_PROVIDER` 환경변수로 LLM 프로바이더를 선택합니다. 기본값은 `codex`.
 
 | 환경변수 | 기본값 | 설명 |
 | --- | --- | --- |
-| `LLM_MODEL` | `phi4` | Ollama 모델명 |
-| `LLM_BASE_URL` | `http://localhost:11434` | Ollama 서버 URL |
+| `LLM_PROVIDER` | `codex` | LLM 프로바이더 (`codex` 또는 `ollama`) |
+| `LLM_MODEL` | `phi4` | Ollama 모델명 (ollama 전용) |
+| `LLM_BASE_URL` | `http://localhost:11434` | Ollama 서버 URL (ollama 전용) |
+| `CODEX_MODEL` | (codex 기본값) | Codex 모델 (codex 전용, 선택) |
 
 ```bash
-# 다른 모델로 실행
-LLM_MODEL=phi4-mini bash bin/email-watcher.sh
+# Codex CLI (기본)
+bash bin/email-watcher.sh
+
+# Ollama 로컬 LLM으로 전환
+LLM_PROVIDER=ollama bash bin/email-watcher.sh
+
+# 다른 Ollama 모델 지정
+LLM_PROVIDER=ollama LLM_MODEL=phi4-mini bash bin/email-watcher.sh
+```
+
+#### Codex CLI 사용 시 사전 준비
+
+```bash
+npm install -g @openai/codex
+export OPENAI_API_KEY=sk-xxx   # 또는 CODEX_API_KEY
 ```
 
 #### 테스트된 모델 후보군

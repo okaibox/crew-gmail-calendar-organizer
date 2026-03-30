@@ -1,6 +1,7 @@
 #!/bin/bash
 # Phase 1: 프로그래밍 방식 패턴 매칭 (메모리 기반, LLM 미사용)
-# Phase 2: 상세 분류 — need_body 메일만 본문 포함하여 개별 AI 분류
+# Phase 1 AI: 메타데이터(제목+발신자+snippet)만으로 AI 분류 (본문 미조회)
+# Phase 2: 상세 분류 — remaining 메일만 본문 포함하여 개별 AI 분류
 # === Phase 1: 메모리 패턴 매칭 (발신자+제목 키워드) ===
 pre_classify() {
   local mail_list_json="$1"
@@ -157,6 +158,174 @@ for nid in need_ids:
     print(f'NEED_BODY:{nid}')
 
 print(f'FAST_DONE:{count}')
+" 2>/dev/null
+}
+
+# === Phase 1 AI: 메타데이터 기반 AI 분류 (본문 미포함) ===
+build_fast_classify_prompt() {
+  local emails="$1"
+  local acct="$2"
+
+  local template
+  template=$(cat "$PROMPTS_DIR/fast-classify.txt")
+  template="${template//\{TODAY\}/$(date +%Y-%m-%d)}"
+
+  local memory_ctx
+  memory_ctx=$(load_memory_context)
+
+  local label_desc
+  label_desc=$(load_label_descriptions)
+
+  echo "${template}
+
+${memory_ctx}
+=== 현재 라벨 목록 ===
+${label_desc}
+
+계정: $acct
+=== 메일 데이터 (메타데이터만, 본문 없음) ===
+$emails"
+}
+
+ai_pre_classify() {
+  local mail_list_json="$1"
+  local acct="$2"
+
+  local prompt
+  prompt=$(build_fast_classify_prompt "$mail_list_json" "$acct")
+
+  llm_call "$prompt" 2>/dev/null || echo '{"results":[],"fast_patterns":[]}'
+}
+
+# === Phase 1 AI 결과 처리 ===
+process_ai_fast_result() {
+  local result_json="$1"
+  local acct="$2"
+  local threshold="${CONFIDENCE_THRESHOLD:-0.6}"
+
+  echo "$result_json" | python3 -c "
+import json, sys, os
+sys.path.insert(0, '$LIB_DIR')
+from google_api import get_auth, GmailClient
+
+raw = sys.stdin.read()
+start = raw.find('{'); end = raw.rfind('}') + 1
+if start == -1:
+    print('AI_FAST_DONE:0')
+    sys.exit(0)
+data = json.loads(raw[start:end])
+
+threshold = float('$threshold')
+queue_dir = '$QUEUE_DIR'
+log_file = '$EMAIL_LOG'
+now_kst = '$NOW_KST'
+acct = '$acct'
+memory_dir = '$MEMORY_DIR'
+
+# API 클라이언트 1회 초기화
+auth = get_auth(acct, '$PROJECT_ROOT')
+client = GmailClient(auth)
+
+classified_count = 0
+need_body_count = 0
+schedule_count = 0
+
+for item in data.get('results', []):
+    mid = item.get('id', '')
+    cls = item.get('classification', {})
+    needs_body = item.get('needs_body', True)
+    needs_review = item.get('needs_user_review', False)
+    schedule = item.get('schedule')
+    log_entry = item.get('log', {})
+
+    label = cls.get('label', '') or ''
+    conf = cls.get('confidence', 0.5)
+    cls_reason = cls.get('reason', '')
+
+    title = log_entry.get('title', '')
+    sender = log_entry.get('from', '')
+    mail_date = log_entry.get('date', '')
+    urgency = log_entry.get('urgency', 'none')
+    summary = log_entry.get('summary', '')
+
+    # needs_body 또는 신뢰도 부족 → Phase 2로
+    if needs_body or needs_review or conf < threshold:
+        print(f'NEED_BODY:{mid}')
+        need_body_count += 1
+        continue
+
+    # 자동 분류 실행 (라벨 + 보관)
+    if mid and label and label not in ('분류안함', 'null', ''):
+        try:
+            client.modify_labels([mid], add_labels=[label], remove_labels=['INBOX'])
+            status = 'success'
+        except:
+            status = 'failed'
+        classified_count += 1
+        print(f'AI_FAST: {label} | {title[:50]} | {sender[:30]} [{status}]')
+
+        # 로그
+        with open(log_file, 'a') as f:
+            f.write(json.dumps({
+                'time': now_kst, 'account': acct, 'email_id': mid,
+                'title': title, 'from': sender, 'label': label,
+                'confidence': conf, 'urgency': urgency, 'summary': summary,
+                'method': 'ai_fast', 'reason': cls_reason
+            }, ensure_ascii=False) + '\n')
+
+    # 일정 감지 → 캘린더 큐
+    if schedule:
+        cal_id = f'cal-{mid[:12]}'
+        cal_path = os.path.join(queue_dir, 'calendars', f'{cal_id}.json')
+        with open(cal_path, 'w') as f:
+            json.dump({
+                'id': cal_id, 'created': now_kst,
+                'source_email': title, 'account': acct,
+                'proposal': {
+                    'type': schedule.get('type', 'event'),
+                    'summary': schedule.get('summary', title),
+                    'start': schedule.get('start', ''),
+                    'end': schedule.get('end', ''),
+                    'location': schedule.get('location'),
+                },
+                'confidence': schedule.get('confidence', 0.5),
+                'needs_confirm': schedule.get('needs_confirm', True),
+                'action': None, 'action_arg': None
+            }, f, ensure_ascii=False, indent=2)
+        schedule_count += 1
+        print(f'SCHEDULE: {schedule.get(\"summary\",\"\")} ({schedule.get(\"start\",\"\")[:16]})')
+
+# fast_patterns 학습
+fast_learned = 0
+for pat in data.get('fast_patterns', []):
+    pat_type = pat.get('type', '')
+    match_key = pat.get('match', '')
+    label = pat.get('label', '')
+    reason = pat.get('reason', '')
+    if not match_key or not label or pat_type != 'keyword':
+        continue
+
+    rf = os.path.join(memory_dir, 'classification-rules.json')
+    try:
+        with open(rf) as f: rd = json.load(f)
+    except: rd = {'version':1,'last_updated':None,'rules':[],'label_descriptions':{}}
+    exists = any(r.get('pattern',{}).get('subject_contains') == match_key for r in rd['rules'])
+    if not exists:
+        rd['rules'].append({
+            'id': f'rule-fast-{len(rd[\"rules\"])+1:03d}',
+            'pattern': {'from_contains': None, 'subject_contains': match_key},
+            'action': {'label': label, 'archive': True},
+            'confidence': 0.9, 'source': 'ai_fast_pattern',
+            'created': now_kst[:10], 'applied_count': 0,
+            'note': f'AI fast: {reason}'
+        })
+        rd['last_updated'] = now_kst
+        with open(rf, 'w') as f:
+            json.dump(rd, f, ensure_ascii=False, indent=2)
+        fast_learned += 1
+        print(f'FAST_LEARN: keyword \"{match_key}\" -> {label}')
+
+print(f'AI_FAST_DONE:{classified_count}')
 " 2>/dev/null
 }
 

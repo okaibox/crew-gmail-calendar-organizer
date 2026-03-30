@@ -62,24 +62,32 @@ python3 lib/google_api.py calendar create CAL_ID --summary TITLE --from START --
 
 | 스크립트 | 트리거 | 역할 |
 | --- | --- | --- |
-| `email-watcher.sh` | cron 5분 | Phase 1 패턴 매칭 → Phase 2 LLM 분류 |
+| `email-watcher.sh` | cron 5분 | Phase 1 패턴+AI 분류 → Phase 2 본문 분류 |
 | `feedback-processor.sh` | 외부 호출 | 사용자 결정 실행 + 메모리 학습 |
 | `memory-consolidator.sh` | cron 매일 | 메모리 중복 제거/충돌 감지/최적화 |
 
 ### 분류 파이프라인
 
-#### Phase 1: 프로그래밍 패턴 매칭 (LLM 미사용)
+#### Phase 1: 패턴 매칭 (LLM 미사용)
 
 `classifier.sh > pre_classify()` — 순수 Python으로 메모리 패턴 매칭.
 
 - 발신자 패턴: `@` 포함 → 이메일 정확 매칭, 없으면 도메인/서브도메인 매칭
 - 키워드 규칙: confidence ≥ 0.8, 키워드 3자 이상, 제목에 포함
-- 출력: `fast[]` (즉시 라벨+보관) / `need_body[]` (Phase 2로)
-- 매칭 0건이면 전체를 Phase 2로 투입
+- 출력: `fast[]` (즉시 라벨+보관) / `need_body[]` (Phase 1 AI로)
 
-#### Phase 2: LLM 상세 분류
+#### Phase 1 AI: 메타데이터 기반 AI 분류
 
-`classifier.sh > classify_emails()` — need_body 스레드를 개별 LLM 호출.
+`classifier.sh > ai_pre_classify()` — 패턴 미매칭 메일을 메타데이터(제목+발신자+snippet)만으로 AI 분류.
+
+- 본문 조회 없이 배치 LLM 호출 (Phase 2보다 빠름)
+- 프롬프트 템플릿: `config/prompts/fast-classify.txt`
+- 확신 있는 분류 → 즉시 라벨+보관 (`method: ai_fast`)
+- 확신 없음(`needs_body: true`) → Phase 2로
+
+#### Phase 2: 본문 포함 상세 분류
+
+`classifier.sh > classify_emails()` — Phase 1 AI에서도 분류 못한 스레드를 개별 LLM 호출.
 
 - 스레드 전체 대화 + 메모리 컨텍스트 + 라벨 설명 포함
 - 프롬프트 템플릿: `config/prompts/classify-email.txt`
@@ -88,16 +96,18 @@ python3 lib/google_api.py calendar create CAL_ID --summary TITLE --from START --
 
 **멱등성**: `_processed` Gmail 라벨로 처리 완료 표시. `-label:_processed`로 중복 방지.
 
-### 로컬 LLM 설정 (Ollama)
+### LLM 설정
 
-`lib/llm_call.py`가 Ollama REST API 래퍼.
+`LLM_PROVIDER` 환경변수로 프로바이더를 선택. `lib/codex_call.py`가 Codex CLI 래퍼(기본), `lib/llm_call.py`가 Ollama 래퍼.
 
 | 환경변수 | 기본값 | 설명 |
 | --- | --- | --- |
-| `LLM_MODEL` | `phi4` | Ollama 모델명 |
-| `LLM_BASE_URL` | `http://localhost:11434` | Ollama 서버 URL |
+| `LLM_PROVIDER` | `codex` | LLM 프로바이더 (`codex` 또는 `ollama`) |
+| `LLM_MODEL` | `phi4` | Ollama 모델명 (ollama 전용) |
+| `LLM_BASE_URL` | `http://localhost:11434` | Ollama 서버 URL (ollama 전용) |
+| `CODEX_MODEL` | (codex 기본값) | Codex 모델 (codex 전용, 선택) |
 
-호출 흐름: `llm_call()` (common.sh) → 임시 파일 → `python3 lib/llm_call.py` → Ollama `/api/generate`
+호출 흐름: `llm_call()` (common.sh) → `LLM_PROVIDER` 분기 → `llm_call.py` (Ollama) 또는 `codex_call.py` (Codex CLI)
 
 ### 큐 시스템
 
@@ -197,7 +207,8 @@ data/queue/
 │   ├── gmail-actions.sh            Gmail API 래핑
 │   ├── calendar-actions.sh         캘린더 API 래핑
 │   ├── google_api.py               Google API OAuth + Gmail/Calendar 클라이언트
-│   └── llm_call.py                 Ollama REST API 래퍼
+│   ├── llm_call.py                 Ollama REST API 래퍼
+│   └── codex_call.py               Codex CLI 래퍼
 ├── config/                       설정
 │   ├── accounts.json               계정 설정 (.gitignore)
 │   ├── accounts.example.json       계정 설정 예시

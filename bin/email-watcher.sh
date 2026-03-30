@@ -4,7 +4,8 @@
 # 스레드 단위 처리: 주고받은 메일을 한 번에 그룹핑
 #
 # Phase 1: 메모리 패턴 매칭 (발신자+제목) → fast/need_body
-# Phase 2: need_body만 본문 포함 개별 LLM 호출
+# Phase 1 AI: need_body를 메타데이터만으로 AI 분류 → 즉시 처리/remaining
+# Phase 2: remaining만 본문 포함 개별 LLM 호출
 # 1배치(20 스레드) 처리 후 종료, 나머지는 다음 cron에서
 
 set -euo pipefail
@@ -166,6 +167,58 @@ for m in json.load(sys.stdin).get('messages', []):
   done
 
   # ============================================
+  # Phase 1 AI: 메타데이터 기반 AI 분류 (본문 미포함)
+  # ============================================
+  TOTAL_AI_FAST=0
+
+  if [ -n "$NEED_BODY_IDS" ]; then
+    NEED_COUNT=$(echo "$NEED_BODY_IDS" | wc -w | tr -d ' ')
+    echo "  Phase 1 AI: 메타데이터 분류 ${NEED_COUNT}건..."
+
+    # MAIL_LIST에서 need_body 항목만 필터
+    NEED_BODY_MAIL_LIST=$(echo "$MAIL_LIST" | python3 -c "
+import json, sys
+need = set('$NEED_BODY_IDS'.split())
+data = json.load(sys.stdin)
+filtered = [m for m in data.get('messages', []) if m['id'] in need]
+print(json.dumps({'messages': filtered}, ensure_ascii=False))
+" 2>/dev/null)
+
+    T1_AI=$(date +%s)
+    AI_FAST_RESULT=$(ai_pre_classify "$NEED_BODY_MAIL_LIST" "$acct") || true
+
+    REMAINING_NEED_BODY_IDS=""
+    while IFS= read -r line; do
+      if [[ "$line" == AI_FAST:* ]]; then
+        echo "  $line"
+      elif [[ "$line" == NEED_BODY:* ]]; then
+        REMAINING_NEED_BODY_IDS+="${line#NEED_BODY:} "
+      elif [[ "$line" == SCHEDULE:* ]]; then
+        echo "  $line"
+      elif [[ "$line" == FAST_LEARN:* ]]; then
+        echo "  $line"
+      elif [[ "$line" == AI_FAST_DONE:* ]]; then
+        TOTAL_AI_FAST="${line#AI_FAST_DONE:}"
+        echo "  → AI 즉시 분류: ${TOTAL_AI_FAST}건 ($(elapsed $T1_AI))"
+      fi
+    done < <(process_ai_fast_result "$AI_FAST_RESULT" "$acct")
+
+    # AI fast 처리된 항목 _processed 표시
+    echo "$NEED_BODY_MAIL_LIST" | python3 -c "
+import json, sys
+remaining = set('$REMAINING_NEED_BODY_IDS'.split())
+for m in json.load(sys.stdin).get('messages', []):
+    if m['id'] not in remaining:
+        print(m['id'])
+" 2>/dev/null | while IFS= read -r tid; do
+      mark_processed "$tid" "$acct"
+    done
+
+    # 남은 need_body만 Phase 2로
+    NEED_BODY_IDS="$REMAINING_NEED_BODY_IDS"
+  fi
+
+  # ============================================
   # Phase 2: 상세 분류 (스레드 본문 포함, 개별)
   # ============================================
   TOTAL_AI=0
@@ -194,7 +247,7 @@ for m in json.load(sys.stdin).get('messages',[]):
     done
   fi
 
-  echo "[$acct] 완료 — 패스트:${TOTAL_FAST} AI:${TOTAL_AI} (총: $(elapsed $TOTAL_START))"
+  echo "[$acct] 완료 — 패턴:${TOTAL_FAST} AI즉시:${TOTAL_AI_FAST} AI상세:${TOTAL_AI} (총: $(elapsed $TOTAL_START))"
 done
 
 # 처리할 게 없었으면 조기 종료

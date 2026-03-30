@@ -269,13 +269,25 @@ print(raw[start:end])
 " 2>/dev/null
 }
 
-# === LLM 호출 (Ollama) ===
+# === LLM 호출 ===
+# LLM_PROVIDER: ollama (기본) | codex
 llm_call() {
   local prompt="$1"
+  local provider="${LLM_PROVIDER:-codex}"
   local tmpfile
   tmpfile=$(mktemp /tmp/llm_XXXXXX)
   printf '%s' "$prompt" > "$tmpfile"
-  python3 "$LIB_DIR/llm_call.py" "$tmpfile"
+
+  case "$provider" in
+    ollama) python3 "$LIB_DIR/llm_call.py" "$tmpfile" ;;
+    codex)  python3 "$LIB_DIR/codex_call.py" "$tmpfile" ;;
+    *)
+      echo "오류: 알 수 없는 LLM_PROVIDER: $provider (ollama|codex)" >&2
+      rm -f "$tmpfile"
+      return 1
+      ;;
+  esac
+
   local status=$?
   rm -f "$tmpfile"
   return $status

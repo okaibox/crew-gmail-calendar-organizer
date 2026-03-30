@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Codex CLI를 기본 LLM 프로바이더로 추가, LLM_PROVIDER 환경변수로 ollama/codex 전환 (llm, common)
+- Phase 1 AI: 메타데이터(제목+발신자+snippet)만으로 AI 분류하는 중간 단계 추가 (classifier, watcher)
 - 사용자 확인 필요 메일에 "확인필요" Gmail 라벨 자동 부착 (classifier)
 
 ### Changed
